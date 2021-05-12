@@ -1,0 +1,6 @@
+train: /content/gdrive/MyDrive/Praca magisterska/collab/train
+val: /content/gdrive/MyDrive/Praca magisterska/collab/test
+
+nc: 4
+
+names: ['car', 'pedestrian', 'cargovelo', 'cyclist']
