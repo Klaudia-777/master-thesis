@@ -10,17 +10,51 @@ import yolov5
 from norfair import Detection, Tracker, Video
 from yolov5.utils.plots import Colors
 
-max_distance_between_points: int = 30
+max_distance_between_points: int = 40
 colors = Colors()  # create instance for 'from utils.plots import colors'
+
 
 def convert_id_to_class(id_number: int):
     color_dict = {
-        0 : "person",
-        1 : "bicycle",
-        2 : "car",
-        80 : "cargovelo"
+        0: "person",
+        1: "bicycle",
+        2: "car",
+        80: "cargovelo"
     }
     return color_dict.get(id_number)
+
+
+class TrackedObject:
+    distance_threshold = 30
+
+    def __init__(self, id, clazz, points, frame):
+        self.id = id
+        self.clazz = clazz
+        self.points = points
+        self.first_frame = frame
+        self.current_frame = frame
+        self.idle = 0
+        self.max_idle = 0
+        self.previous_idle = 0
+
+    def step(self, frame, new_points):
+        if self.clazz == 2:
+            if computeDistance(self.points, new_points) <= max_distance_between_points:
+                self.idle += 1
+            else:
+                if (self.previous_idle > 100):
+                    tmp = self.previous_idle
+                    self.previous_idle = self.idle
+                    self.idle += tmp
+                    self.max_idle = max(self.max_idle, self.idle)
+                else:
+                    self.max_idle = max(self.max_idle, self.idle)
+                    self.previous_idle = self.idle
+                    self.idle = 0
+        self.points = new_points
+        self.current_frame = frame
+
+
 class New_tracked_object:
     def __init__(self, identity, i):
         self.identity = identity
@@ -80,7 +114,7 @@ def yolo_detections_to_norfair_detections(
             )
             scores = np.array([detection_as_xywh[4].item()])
             norfair_detections.append(
-                Detection(points=centroid, scores=scores)
+                Detection(points=centroid, scores=scores, data=int(detection_as_xywh[5].item()))
             )
     elif track_points == 'bbox':
         detections_as_xyxy = yolo_detections.xyxy[0]
@@ -118,6 +152,47 @@ detected_objects = {}
 detected_classes = set()
 
 
+def computeCenterPoint(points):
+    x = points[0][0]
+
+
+def computeDistance(points1, points2):
+    return np.linalg.norm(points1 - points2)
+    # return pow(pow(points1[0][0] - points2[1][0], 2) + pow(points1[0][1] - points2[1][1], 2), -2)
+
+
+def findClosestDetectedObject(trackedObject, detected_objects, tracked_objects):
+    minDistance = 11111111
+    closest_object = None
+    trackedIds = map(lambda x: x.id, tracked_objects)
+    for key in detected_objects:
+        detected_object = detected_objects[key]
+        distance = computeDistance(detected_object.points, trackedObject.last_detection.points)
+        if distance < minDistance and trackedObject.last_detection.data == detected_object.clazz and detected_object.id not in trackedIds:
+            closest_object = detected_object
+            minDistance = distance
+    return (minDistance, closest_object)
+
+
+def addTrackedObject(frame, tracked_object):
+    if tracked_object.id in detected_objects:
+        detected_objects[tracked_object.id].step(frame, tracked_object.last_detection.points)
+    else:
+        detected_objects[tracked_object.id] = TrackedObject(tracked_object.id, tracked_object.last_detection.data,
+                                                            tracked_object.last_detection.points, frame)
+
+
+def replaceClosestTrackedObject(frame, closest_tracked_object, tracked_object):
+    if closest_tracked_object.id in detected_objects:
+        detected_objects.pop(closest_tracked_object.id)
+        closest_tracked_object.id = tracked_object.id
+        closest_tracked_object.step(frame, tracked_object.last_detection.points)
+        detected_objects[closest_tracked_object.id] = closest_tracked_object
+    else:
+        detected_objects[tracked_object.id] = TrackedObject(tracked_object.id, tracked_object.last_detection.data,
+                                                            tracked_object.last_detection.points, frame)
+
+
 def plot_one_box(x, im, color=(128, 128, 128), label=None, line_thickness=3):
     # Plots one bounding box on image 'im' using OpenCV
     assert im.data.contiguous, 'Image not contiguous. Apply np.ascontiguousarray(im) to plot_on_box() input image.'
@@ -139,47 +214,70 @@ for input_path in args.files:
         distance_threshold=max_distance_between_points,
     )
 
+    i = 0
     for frame in video:
-        yolo_detections = model(
-            frame,
-            conf_threshold=args.conf_thres,
-            iou_threshold=args.conf_thres,
-            image_size=args.img_size,
-            classes=args.classes
-        )
-        detections = yolo_detections_to_norfair_detections(yolo_detections, track_points=args.track_points)
-        tracked_objects = tracker.update(detections=detections)
-        for d in detections:
-            detected_classes.add(d.data)
-        if args.track_points == 'centroid':
-            norfair.draw_points(frame, detections)
-        elif args.track_points == 'bbox':
-            norfair.draw_boxes(frame, detections, line_width=3)
-        if len(tracked_objects) > 0:
-            for tracked_object in tracked_objects:
-                detected_objects[tracked_object.id] = tracked_object
-        new_tracked_objects=[]
-        for d in detections:
-            points = [d.points[0][0], d.points[0][1], d.points[1][0], d.points[1][1]]
-            plot_one_box(points, frame, label=convert_id_to_class(d.data), color=colors(d.data, True), line_thickness=3)
+        if i % 5 == 0:
+            yolo_detections = model(
+                frame,
+                conf_threshold=args.conf_thres,
+                iou_threshold=args.conf_thres,
+                image_size=args.img_size,
+                classes=args.classes
+            )
 
-    # for to in tracked_objects:
-    #         new_tracked_objects.append(New_tracked_object(identity=to.id, id=to.last_detection.data))
-        # norfair.draw_tracked_objects(frame, new_tracked_objects)
-        video.write(frame)
+            detections = yolo_detections_to_norfair_detections(yolo_detections, track_points=args.track_points)
+            tracked_objects = tracker.update(detections=detections)
+            for d in detections:
+                detected_classes.add(d.data)
+            # if args.track_points == 'centroid':
+            #     # norfair.draw_points(frame, detections)
+            # elif args.track_points == 'bbox':
+            #     # norfair.draw_boxes(frame, detections, line_width=3)
+            if len(tracked_objects) > 0:
+                detectedIds = map(lambda x: x.id, detected_objects)
+                for tracked_object in tracked_objects:
+                    if tracked_object.id not in detected_objects:
+                        distance, closest_object = findClosestDetectedObject(tracked_object, detected_objects,
+                                                                             tracked_objects)
+                        if closest_object is None:
+                            addTrackedObject(i, tracked_object)
 
+                        elif distance < 60 and closest_object.clazz == tracked_object.last_detection.data:
+                            replaceClosestTrackedObject(i, closest_object, tracked_object)
+                        else:
+                            addTrackedObject(i, tracked_object)
+                    else:
+                        addTrackedObject(i, tracked_object)
+
+            trackedIds = map(lambda x: x.id, tracked_objects)
+            # for key in detected_objects:
+            #  detected_object = detected_objects[key]
+            # if detected_object.id not in trackedIds:
+            #    detected_object.step(detected_object.current_frame, detected_object.points)
+            new_tracked_objects = []
+            # for d in detections:
+            #     points = [d.points[0][0], d.points[0][1], d.points[1][0], d.points[1][1]]
+            #     plot_one_box(points, frame, label=convert_id_to_class(d.data), color=colors(d.data, True), line_thickness=3)
+
+            # for to in tracked_objects:
+            #         new_tracked_objects.append(New_tracked_object(identity=to.id, id=to.last_detection.data))
+            # norfair.draw_tracked_objects(frame, new_tracked_objects)
+            video.write(frame)
+        i += 1
 counters = {0: 0, 1: 0, 2: 0}
 size = len(str(args.files))
-csv_file = open(str(args.files)[2:size-6]+'.csv', 'w')
+csv_file = open(str(args.files).split('.')[0][2:] + '.csv', 'w')
 writer = csv.writer(csv_file)
-writer.writerow(["Object ID", "Class", "Object age on camera"])
+writer.writerow(["Object ID", "Class", "Object First Frame", "Object Last Frame", "Object Max Idle"])
 
 for key in detected_objects:
     detected_object = detected_objects[key]
-    writer.writerow([detected_object.id, detected_object.last_detection.data, detected_object.age])
-    counters[detected_object.last_detection.data] = counters[detected_object.last_detection.data] + 1
+    writer.writerow(
+        [detected_object.id, detected_object.clazz, detected_object.first_frame, detected_object.current_frame,
+         detected_object.max_idle])
+    counters[detected_object.clazz] = counters[detected_object.clazz] + 1
 
-summary_file = open(str(args.files)[2:size-6]+'_summary.txt', 'w')
+summary_file = open(str(args.files).split('.')[0][2:] + '_summary.txt', 'w')
 summary_writer = csv.writer(summary_file)
 for cls in detected_classes:
     print("detected: " + str(counters[cls]) + " " + model.names[cls])
